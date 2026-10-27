@@ -180,6 +180,29 @@ public struct Attribute: Equatable, Hashable {
     }
 }
 
+/// Released atom codes, handed out oldest first so a code is reissued as late as possible.
+struct FreeAtomCodes {
+    private var codes: [UInt16] = []
+    private var head = 0
+
+    mutating func put(_ code: UInt16) {
+        codes.append(code)
+    }
+
+    mutating func take() -> UInt16? {
+        guard head < codes.count else {
+            return nil
+        }
+        let code = codes[head]
+        head += 1
+        if head > 64 && head * 2 > codes.count {
+            codes.removeFirst(head)
+            head = 0
+        }
+        return code
+    }
+}
+
 /// TinyAtoms are 16-bit values that can be used to represent a string as a number
 /// you create them by calling TinyAtom.lookup (Any) and retrieve the
 /// value using the `target` property.   They are used to store the urls and any
@@ -193,6 +216,9 @@ public struct TinyAtom {
     private static let lock = NSLock()
     private static var map: [UInt16:Any] = [:]
     private static var lastUsed: UInt16 = 0
+    /// Released codes, handed out again before a new one is taken: without them the
+    /// 16-bit space is spent once and every later lookup fails for the life of the process.
+    private static var free = FreeAtomCodes()
     static let empty = TinyAtom (code: 0)
    
     private init(code: UInt16)
@@ -208,6 +234,10 @@ public struct TinyAtom {
         lock.lock()
         defer { lock.unlock() }
 
+        if let code = free.take() {
+            map [code] = value
+            return TinyAtom (code: code)
+        }
         guard lastUsed < UInt16.max - 1 else {
             return nil
         }
@@ -224,7 +254,8 @@ public struct TinyAtom {
 
     /// Releases a caller-owned atom.
     ///
-    /// After this call, ``target`` returns nil for this atom and for all copies of it.
+    /// After this call, ``target`` returns nil for this atom and for all copies of it, until
+    /// ``lookup(value:)`` hands its code out again: release a code only once nothing still holds it.
     public func release() {
         TinyAtom.release(code: code)
     }
@@ -234,7 +265,9 @@ public struct TinyAtom {
         defer { lock.unlock() }
 
         for code in codes where code != 0 {
-            map.removeValue(forKey: code)
+            if map.removeValue(forKey: code) != nil {
+                free.put(code)
+            }
         }
     }
     
